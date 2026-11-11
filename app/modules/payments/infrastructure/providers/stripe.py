@@ -143,6 +143,10 @@ class StripeProvider:
         found = await self._search(request.charge.idempotency_key)
         if found is not None:
             return found
+        if not request.replay_allowed:
+            # The client already has an answer: a replay that reaches Stripe for the first
+            # time would be a charge nobody expects now. Stay unknown, a human decides.
+            return ProviderOutcome.unknown("not_found_no_replay_after_cascade")
         if request.attempt_age is not None and request.attempt_age < REPLAY_WINDOW:
             # Idempotent replay, see the module docstring. Only a real answer counts:
             # the intent (200) or a card decline (402). A failed replay says nothing

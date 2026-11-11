@@ -129,7 +129,7 @@ async def test_young_attempt_not_found_is_replayed_with_same_key() -> None:
     req = request()
     replay = httpx.Response(200, json={"id": "pi_1", "status": "succeeded"})
     outcome = await stripe([NOTHING_FOUND, replay], seen).get_status(
-        StatusRequest(charge=req, attempt_age=timedelta(seconds=5))
+        StatusRequest(charge=req, attempt_age=timedelta(seconds=5), replay_allowed=True)
     )
     assert outcome.kind is K.APPROVED
     assert seen[1].method == "POST"
@@ -156,7 +156,7 @@ async def test_failed_read_by_id_leaves_the_charge_unknown(
 async def test_failed_search_leaves_the_charge_unknown() -> None:
     seen: list[httpx.Request] = []
     outcome = await stripe([REFUSED], seen).get_status(
-        StatusRequest(charge=request(), attempt_age=timedelta(seconds=5))
+        StatusRequest(charge=request(), attempt_age=timedelta(seconds=5), replay_allowed=True)
     )
     assert outcome.kind is K.UNKNOWN
     assert len(seen) == 1  # no replay after a failed search
@@ -165,14 +165,14 @@ async def test_failed_search_leaves_the_charge_unknown() -> None:
 @pytest.mark.parametrize("failure", [REFUSED, RATE_LIMITED, BAD_KEY])
 async def test_failed_replay_leaves_the_charge_unknown(failure: httpx.Response | Exception) -> None:
     outcome = await stripe([NOTHING_FOUND, failure], []).get_status(
-        StatusRequest(charge=request(), attempt_age=timedelta(seconds=5))
+        StatusRequest(charge=request(), attempt_age=timedelta(seconds=5), replay_allowed=True)
     )
     assert outcome.kind is K.UNKNOWN
 
 
 async def test_replayed_card_decline_is_a_real_answer() -> None:
     outcome = await stripe([NOTHING_FOUND, card_error("do_not_honor")], []).get_status(
-        StatusRequest(charge=request(), attempt_age=timedelta(seconds=5))
+        StatusRequest(charge=request(), attempt_age=timedelta(seconds=5), replay_allowed=True)
     )
     assert (outcome.kind, outcome.code) == (K.SOFT_DECLINE, "do_not_honor")
 
@@ -181,7 +181,18 @@ async def test_old_attempt_is_never_replayed() -> None:
     """After 24 h Stripe forgets the key and a replay would be a new charge."""
     seen: list[httpx.Request] = []
     outcome = await stripe([NOTHING_FOUND], seen).get_status(
-        StatusRequest(charge=request(), attempt_age=timedelta(hours=3))
+        StatusRequest(charge=request(), attempt_age=timedelta(hours=3), replay_allowed=True)
+    )
+    assert outcome.kind is K.UNKNOWN
+    assert [r.method for r in seen] == ["GET"]
+
+
+async def test_no_replay_once_the_client_has_an_answer() -> None:
+    """Background checks run after the client got requires_review (or after another
+    attempt settled the payment): a replay there could be a first, unexpected charge."""
+    seen: list[httpx.Request] = []
+    outcome = await stripe([NOTHING_FOUND], seen).get_status(
+        StatusRequest(charge=request(), attempt_age=timedelta(seconds=5))
     )
     assert outcome.kind is K.UNKNOWN
     assert [r.method for r in seen] == ["GET"]

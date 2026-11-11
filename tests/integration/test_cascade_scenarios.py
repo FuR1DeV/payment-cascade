@@ -273,5 +273,7 @@ async def test_api_validation(client: httpx.AsyncClient) -> None:
     assert float_amount.status_code == 422
     card_number = await pay(client, token="4242424242424242")
     assert card_number.status_code == 422
+    hidden_card_number = await pay(client, token="tok_4242424242424242")
+    assert hidden_card_number.status_code == 422
     assert (await client.get(f"/payments/{'0' * 8}-0000-0000-0000-{'0' * 12}")).status_code == 404
     assert await scalar("SELECT count(*) FROM payments") == 0

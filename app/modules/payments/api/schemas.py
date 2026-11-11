@@ -1,8 +1,9 @@
+import re
 from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.modules.payments.domain.entities import Alert, Payment, PaymentAttempt
 
@@ -13,6 +14,15 @@ class PaymentMethodIn(BaseModel):
     type: Literal["card"] = "card"
     # Opaque token from the vault. Card numbers are never accepted.
     token: str = Field(pattern=r"^tok_[a-z0-9_]{1,60}$", examples=["tok_soft_decline"])
+
+    @field_validator("token")
+    @classmethod
+    def _no_card_number_inside(cls, value: str) -> str:
+        # The pattern alone lets "tok_4242424242424242" through: a card number with a prefix
+        # is still a card number. Card numbers are 12 to 19 digits long.
+        if re.search(r"\d{12,}", value):
+            raise ValueError("looks like a card number; send a vault token instead")
+        return value
 
 
 class CreatePaymentRequest(BaseModel):

@@ -32,6 +32,10 @@ class StatusRequest:
     charge: ChargeRequest
     provider_payment_id: str | None = None
     attempt_age: timedelta | None = None  # time since the attempt was created
+    # A provider may answer a status query by repeating the request with the same
+    # idempotency key (Stripe). That is a write: if the first request never arrived, the
+    # repeat is the charge. Allowed only while the cascade runs and the client waits.
+    replay_allowed: bool = False
 
 
 @dataclass(frozen=True)

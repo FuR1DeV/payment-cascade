@@ -229,7 +229,10 @@ def replying(cls: type[AlphaProvider] | type[BetaProvider], status: int, body: d
     [
         # Only "not found" is an answer about the charge (the reference is stored on
         # receipt). Any other rejection of the status query leaves the charge unknown.
-        (404, {"error": "not found"}, K.TECHNICAL_ERROR),
+        (404, {"detail": "not_found"}, K.TECHNICAL_ERROR),
+        # A 404 that is not the provider's own answer: a proxy, an ingress, a wrong path.
+        (404, {"detail": "unknown provider"}, K.UNKNOWN),
+        (404, {}, K.UNKNOWN),
         (400, {"error": "bad request"}, K.UNKNOWN),
         (401, {"error": "bad key"}, K.UNKNOWN),
         (429, {"error": "slow down"}, K.UNKNOWN),

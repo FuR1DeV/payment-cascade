@@ -70,6 +70,12 @@ BETA_CODES: dict[str, OutcomeKind] = {
 }
 
 
+def _provider_has_no_such_reference(response: httpx.Response) -> bool:
+    """The provider's own "no such reference" answer, not a 404 from a proxy, an ingress
+    or a wrong path: only the former says anything about the charge."""
+    return response.status_code == 404 and (safe_json(response) or {}).get("detail") == "not_found"
+
+
 def classify_decline(table: dict[str, OutcomeKind], provider: str, code: str | None) -> OutcomeKind:
     if code in table:
         return table[code]
@@ -142,7 +148,7 @@ class AlphaProvider(_MockProviderBase):
         )
         if isinstance(response, ProviderOutcome):
             return unanswered_status_query(response)
-        if response.status_code == 404:
+        if _provider_has_no_such_reference(response):
             # Alpha's contract: the reference is stored when the request is received.
             # "Not found" therefore means the request never arrived: nothing was charged.
             return ProviderOutcome.technical_error("not_found", "provider has no such payment")
@@ -248,7 +254,7 @@ class BetaProvider(_MockProviderBase):
         )
         if isinstance(response, ProviderOutcome):
             return unanswered_status_query(response)
-        if response.status_code == 404:
+        if _provider_has_no_such_reference(response):
             # Same contract as alpha: references are stored on receipt.
             return ProviderOutcome.technical_error("not_found", "provider has no such charge")
         if response.status_code != 200:

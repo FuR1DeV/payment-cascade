@@ -53,6 +53,13 @@ IN_FLIGHT = frozenset({A.PENDING, A.UNKNOWN})
 MONEY_TAKEN = frozenset({A.APPROVED, A.REFUND_PENDING, A.REFUNDED})
 NOT_CHARGED = frozenset({A.DECLINED_SOFT, A.DECLINED_HARD, A.ERROR})
 
+# Sizes of the payment_attempts columns. Longer values from a provider are cut: an
+# outcome that cannot be saved would leave the payment stuck, a cut code would not.
+PROVIDER_PAYMENT_ID_MAX = 128
+PROVIDER_CODE_MAX = 64
+PROVIDER_MESSAGE_MAX = 500
+REFUND_ID_MAX = 128
+
 OUTCOME_TO_STATUS: dict[OutcomeKind, AttemptStatus] = {
     OutcomeKind.APPROVED: A.APPROVED,
     OutcomeKind.SOFT_DECLINE: A.DECLINED_SOFT,
@@ -113,7 +120,7 @@ class PaymentAttempt(BaseModel):
         - "approved" after "not charged" is accepted and flagged as a late approval.
         """
         if outcome.provider_payment_id and not self.provider_payment_id:
-            self.provider_payment_id = outcome.provider_payment_id
+            self.provider_payment_id = outcome.provider_payment_id[:PROVIDER_PAYMENT_ID_MAX]
         target = OUTCOME_TO_STATUS[outcome.kind]
         if target == self.status:
             return False
@@ -142,9 +149,9 @@ class PaymentAttempt(BaseModel):
 
     def _set_code(self, outcome: ProviderOutcome) -> None:
         if outcome.code is not None:
-            self.provider_code = outcome.code
+            self.provider_code = outcome.code[:PROVIDER_CODE_MAX]
         if outcome.message is not None:
-            self.provider_message = outcome.message[:500]
+            self.provider_message = outcome.message[:PROVIDER_MESSAGE_MAX]
 
     def schedule_status_check(self, now: datetime, delay: timedelta) -> None:
         if self.status is not A.UNKNOWN:
@@ -161,7 +168,7 @@ class PaymentAttempt(BaseModel):
 
     def mark_refunded(self, refund_id: str | None, now: datetime) -> None:
         self._transition(A.REFUNDED, now)
-        self.refund_id = refund_id
+        self.refund_id = refund_id[:REFUND_ID_MAX] if refund_id else refund_id
         self.next_refund_at = None
 
     def schedule_refund_retry(self, now: datetime, delay: timedelta) -> None:

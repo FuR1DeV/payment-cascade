@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from datetime import datetime, timedelta
 
 from app.modules.payments.domain.entities import Alert, Payment, PaymentAttempt
-from app.modules.payments.domain.enums import AlertKind
+from app.modules.payments.domain.enums import AlertKind, PaymentStatus
 from app.modules.payments.domain.events import (
     ConflictingOutcomeIgnored,
     DomainEvent,
@@ -137,6 +137,9 @@ def status_request(payment: Payment, attempt: PaymentAttempt, now: datetime) -> 
         charge=charge_request(payment, attempt),
         provider_payment_id=attempt.provider_payment_id,
         attempt_age=now - attempt.created_at,
+        # Background checks run on payments the client already got an answer for
+        # (requires_review, or settled by another attempt): read-only queries there.
+        replay_allowed=payment.status is PaymentStatus.PROCESSING,
     )
 
 
