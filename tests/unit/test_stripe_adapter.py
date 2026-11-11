@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import timedelta
 from uuid import uuid4
 
 import httpx
@@ -94,14 +95,50 @@ async def test_request_carries_test_payment_method_and_idempotency_key() -> None
     assert form["currency"] == "usd"
 
 
-async def test_status_without_intent_id_replays_with_same_key() -> None:
+NOTHING_FOUND = httpx.Response(200, json={"object": "search_result", "data": []})
+
+
+async def test_status_by_known_intent_id_reads_the_intent() -> None:
+    seen: list[httpx.Request] = []
+    provider = stripe([httpx.Response(200, json={"id": "pi_9", "status": "processing"})], seen)
+    outcome = await provider.get_status(StatusRequest(charge=request(), provider_payment_id="pi_9"))
+    assert (outcome.kind, outcome.provider_payment_id) == (K.UNKNOWN, "pi_9")
+    assert (seen[0].method, seen[0].url.path) == ("GET", "/v1/payment_intents/pi_9")
+
+
+async def test_status_found_by_metadata_search_needs_no_replay() -> None:
+    seen: list[httpx.Request] = []
+    found = httpx.Response(200, json={"data": [{"id": "pi_5", "status": "succeeded"}]})
+    req = request()
+    outcome = await stripe([found], seen).get_status(
+        StatusRequest(charge=req, attempt_age=timedelta(seconds=5))
+    )
+    assert (outcome.kind, outcome.provider_payment_id) == (K.APPROVED, "pi_5")
+    assert len(seen) == 1
+    assert seen[0].url.path == "/v1/payment_intents/search"
+    assert req.idempotency_key in seen[0].url.params["query"]
+
+
+async def test_young_attempt_not_found_is_replayed_with_same_key() -> None:
     seen: list[httpx.Request] = []
     req = request()
-    provider = stripe([httpx.Response(200, json={"id": "pi_1", "status": "succeeded"})], seen)
-    outcome = await provider.get_status(StatusRequest(charge=req))
+    replay = httpx.Response(200, json={"id": "pi_1", "status": "succeeded"})
+    outcome = await stripe([NOTHING_FOUND, replay], seen).get_status(
+        StatusRequest(charge=req, attempt_age=timedelta(seconds=5))
+    )
     assert outcome.kind is K.APPROVED
-    assert seen[0].method == "POST"
-    assert seen[0].headers["Idempotency-Key"] == req.idempotency_key
+    assert seen[1].method == "POST"
+    assert seen[1].headers["Idempotency-Key"] == req.idempotency_key
+
+
+async def test_old_attempt_is_never_replayed() -> None:
+    """After 24 h Stripe forgets the key and a replay would be a new charge."""
+    seen: list[httpx.Request] = []
+    outcome = await stripe([NOTHING_FOUND], seen).get_status(
+        StatusRequest(charge=request(), attempt_age=timedelta(hours=3))
+    )
+    assert outcome.kind is K.UNKNOWN
+    assert [r.method for r in seen] == ["GET"]
 
 
 def test_only_mapped_tokens_are_routed_to_stripe() -> None:
@@ -129,6 +166,12 @@ def test_webhook_signature() -> None:
     assert parsed.outcome.kind is K.APPROVED
     with pytest.raises(InvalidWebhookError):
         provider.parse_webhook({"stripe-signature": f"t={ts},v1={'0' * 64}"}, body)
+
+
+@pytest.mark.parametrize("header", ["t=²³,v1=abc", f"t={int(time.time())},v1=é"])
+def test_garbage_signature_header_is_rejected(header: str) -> None:
+    with pytest.raises(InvalidWebhookError):
+        stripe([], []).parse_webhook({"stripe-signature": header}, b"{}")
 
 
 def test_live_keys_are_rejected() -> None:

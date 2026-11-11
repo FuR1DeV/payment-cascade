@@ -2,7 +2,7 @@
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from types import TracebackType
 from typing import Any, Protocol, Self
@@ -31,6 +31,7 @@ class ChargeRequest:
 class StatusRequest:
     charge: ChargeRequest
     provider_payment_id: str | None = None
+    attempt_age: timedelta | None = None  # time since the attempt was created
 
 
 @dataclass(frozen=True)

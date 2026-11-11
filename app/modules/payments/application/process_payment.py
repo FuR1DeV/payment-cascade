@@ -154,7 +154,7 @@ class ProcessPayment:
             await self._sleep(delay)
         provider = self._providers.get(attempt.provider)
         try:
-            outcome = await provider.get_status(status_request(payment, attempt))
+            outcome = await provider.get_status(status_request(payment, attempt, self._clock()))
         except Exception:
             logger.exception("provider_status_check_crashed")
             outcome = ProviderOutcome.unknown("adapter_exception")
@@ -171,8 +171,9 @@ class ProcessPayment:
                 raise PaymentNotFoundError(payment_id)
             now = self._clock()
             attempt = payment.attempt(attempt_no)
-            if outcome.kind is OutcomeKind.UNKNOWN and attempt.status is AttemptStatus.UNKNOWN:
+            was_unknown = attempt.status is AttemptStatus.UNKNOWN
+            # Applied even when the answer is "unknown": it may carry the provider's id.
+            payment.record_outcome(attempt_no, outcome, now)
+            if was_unknown and attempt.status is AttemptStatus.UNKNOWN:
                 attempt.schedule_status_check(now, timedelta(0))
-            else:
-                payment.record_outcome(attempt_no, outcome, now)
             await persist(uow, payment, self._jobs)

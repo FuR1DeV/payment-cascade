@@ -138,6 +138,7 @@ def test_review_resolves_to_success_or_failure() -> None:
     not_charged.record_outcome(1, UNKNOWN, T0)
     not_charged.require_review("timeout", T0)
     assert not_charged.resolve_review(T0) is False  # still unknown
+    # The answer may come from a status check or a webhook: either way the review ends.
     not_charged.record_outcome(1, ERROR, T0)
-    assert not_charged.resolve_review(T0) is True
     assert not_charged.status is PaymentStatus.FAILED
+    assert not_charged.failure_reason == "not_charged_after_review"

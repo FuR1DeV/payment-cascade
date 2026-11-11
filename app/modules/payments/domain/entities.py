@@ -328,6 +328,10 @@ class Payment(BaseModel):
             self.updated_at = now
             if attempt.status is A.APPROVED:
                 self._on_approved(attempt, now)
+            else:
+                # Whoever brought the answer (status check or webhook), a review whose
+                # last open attempt turned out "not charged" is over.
+                self.resolve_review(now)
         return changed
 
     def _on_approved(self, attempt: PaymentAttempt, now: datetime) -> None:

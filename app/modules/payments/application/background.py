@@ -14,7 +14,7 @@ from uuid import UUID
 from app.core.clock import Clock, utc_now
 from app.core.logging import log_context
 from app.modules.payments.domain.entities import Alert
-from app.modules.payments.domain.enums import AlertKind, AttemptStatus, OutcomeKind, PaymentStatus
+from app.modules.payments.domain.enums import AlertKind, AttemptStatus, PaymentStatus
 from app.modules.payments.domain.outcome import ProviderOutcome
 
 from .common import backoff, persist, status_request
@@ -81,7 +81,7 @@ class ReconcileUnknownAttempts:
             return
         try:
             outcome = await self._providers.get(attempt.provider).get_status(
-                status_request(payment, attempt)
+                status_request(payment, attempt, self._clock())
             )
         except Exception:
             logger.exception("provider_status_check_crashed")
@@ -96,7 +96,9 @@ class ReconcileUnknownAttempts:
             attempt = payment.attempt(ref.attempt_no)
             now = self._clock()
             alerts: list[Alert] = []
-            if attempt.status is AttemptStatus.UNKNOWN and outcome.kind is OutcomeKind.UNKNOWN:
+            # Even an "unknown" answer may carry the provider's payment id: keep it.
+            payment.record_outcome(attempt.attempt_no, outcome, now)
+            if attempt.status is AttemptStatus.UNKNOWN:
                 # The delay grows with the age of the attempt: frequent checks in the first
                 # minutes, when most cases resolve, rare ones later. Age rather than the check
                 # count, because the inline loop has already made several quick checks.
@@ -118,9 +120,6 @@ class ReconcileUnknownAttempts:
                             created_at=now,
                         )
                     )
-            else:
-                payment.record_outcome(attempt.attempt_no, outcome, now)
-            payment.resolve_review(now)
             await persist(uow, payment, self._jobs, alerts)
 
 
@@ -209,9 +208,10 @@ class ExecutePendingRefunds:
 
 
 class RecoverStalePayments:
-    """A payment stuck in created/processing long after its deadline means the process that
-    ran the cascade died. A pending attempt then may or may not have reached the provider,
-    so it becomes unknown, and the regular cascade logic takes it from there."""
+    """A payment stuck in created/processing long after its deadline, or a 'pending' attempt
+    long after the deadline (even on a payment another attempt already settled), means the
+    process waiting for that provider died. The request may or may not have reached the
+    provider, so the attempt becomes unknown and gets status checks like any other."""
 
     def __init__(
         self,
@@ -242,19 +242,22 @@ class RecoverStalePayments:
     async def _recover(self, payment_id: UUID) -> None:
         async with self._uow_factory() as uow:
             payment = await uow.payments.get(payment_id, for_update=True)
-            if payment is None or payment.status not in (
-                PaymentStatus.CREATED,
-                PaymentStatus.PROCESSING,
-            ):
+            if payment is None:
                 return
             now = self._clock()
             if payment.deadline_at + self._grace > now:
                 return
-            for attempt in payment.attempts:
-                if attempt.status is AttemptStatus.PENDING:
-                    payment.record_outcome(
-                        attempt.attempt_no, ProviderOutcome.unknown("stale_pending"), now
-                    )
-            logger.warning("stale_payment_recovered")
+            pending = [a for a in payment.attempts if a.status is AttemptStatus.PENDING]
+            abandoned = payment.status in (PaymentStatus.CREATED, PaymentStatus.PROCESSING)
+            if not pending and not abandoned:
+                return
+            for attempt in pending:
+                # The request may or may not have reached the provider. Unknown, so the
+                # status gets checked; never a blind retry or a cascade.
+                payment.record_outcome(
+                    attempt.attempt_no, ProviderOutcome.unknown("stale_pending"), now
+                )
+            logger.warning("stale_payment_recovered", extra={"pending_attempts": len(pending)})
             await persist(uow, payment, self._jobs)
-        await self._process_payment(payment_id)
+        if abandoned:
+            await self._process_payment(payment_id)

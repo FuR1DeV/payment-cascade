@@ -132,6 +132,31 @@ async def test_review_resolves_to_failed_when_provider_never_got_it(
         await container.close()
 
 
+async def test_review_resolved_by_a_decline_webhook(
+    alpha: FakeProvider, beta: FakeProvider, gamma: FakeProvider, jobs: RecordingJobs
+) -> None:
+    container = await build_container(
+        short_budget_settings(), providers=[alpha, beta, gamma], jobs=jobs
+    )
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=create_app(container)), base_url="http://test"
+        ) as client:
+            alpha.charge_script = [unknown("timeout")]
+            payment = (await pay(client)).json()
+            assert payment["status"] == "requires_review"
+            body, headers = signed_webhook(
+                event_id="evt_d", attempt_key=f"{payment['id']}:1", kind="soft_decline", code="05"
+            )
+            await client.post("/webhooks/mock_alpha", content=body, headers=headers)
+            final = (await client.get(f"/payments/{payment['id']}")).json()
+            assert final["status"] == "failed"
+            assert final["failure_reason"] == "not_charged_after_review"
+            assert await container.reconcile_unknown() == 0
+    finally:
+        await container.close()
+
+
 async def test_late_webhook_after_cascade_is_detected_and_refunded(
     client: httpx.AsyncClient,
     container: Container,

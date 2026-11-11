@@ -141,12 +141,16 @@ class SqlPaymentRepository:
     async def claim_due_status_checks(
         self, now: datetime, lease_until: datetime, limit: int
     ) -> list[AttemptRef]:
+        # Any payment not being processed right now: requires_review, but also succeeded or
+        # failed ones, where another attempt settled the payment while this one was in flight.
+        # The payment row is locked too (skip if busy), so a concurrent save of the aggregate
+        # cannot overwrite the lease we set here.
         due = (
             sa.select(payment_attempts.c.id)
             .join(payments, payments.c.id == payment_attempts.c.payment_id)
             .where(
                 payment_attempts.c.status == AttemptStatus.UNKNOWN.value,
-                payments.c.status == PaymentStatus.REQUIRES_REVIEW.value,
+                payments.c.status != PaymentStatus.PROCESSING.value,
                 sa.or_(
                     payment_attempts.c.next_status_check_at.is_(None),
                     payment_attempts.c.next_status_check_at <= now,
@@ -154,7 +158,7 @@ class SqlPaymentRepository:
             )
             .order_by(payment_attempts.c.next_status_check_at)
             .limit(limit)
-            .with_for_update(of=payment_attempts, skip_locked=True)
+            .with_for_update(of=[payment_attempts, payments], skip_locked=True)
         )
         return await self._claim(due, payment_attempts.c.next_status_check_at, lease_until)
 
@@ -163,6 +167,7 @@ class SqlPaymentRepository:
     ) -> list[AttemptRef]:
         due = (
             sa.select(payment_attempts.c.id)
+            .join(payments, payments.c.id == payment_attempts.c.payment_id)
             .where(
                 payment_attempts.c.status == AttemptStatus.REFUND_PENDING.value,
                 sa.or_(
@@ -172,7 +177,7 @@ class SqlPaymentRepository:
             )
             .order_by(payment_attempts.c.next_refund_at)
             .limit(limit)
-            .with_for_update(skip_locked=True)
+            .with_for_update(of=[payment_attempts, payments], skip_locked=True)
         )
         return await self._claim(due, payment_attempts.c.next_refund_at, lease_until)
 
@@ -189,7 +194,10 @@ class SqlPaymentRepository:
         return [AttemptRef(payment_id=r.payment_id, attempt_no=r.attempt_no) for r in rows]
 
     async def find_stale(self, older_than: datetime, limit: int) -> list[UUID]:
-        stmt = (
+        """Payments whose cascade was abandoned: still created/processing long after the
+        deadline, or with a 'pending' attempt long after the deadline whatever the payment
+        status (the process died while waiting for that provider)."""
+        abandoned = (
             sa.select(payments.c.id)
             .where(
                 payments.c.status.in_(
@@ -200,7 +208,19 @@ class SqlPaymentRepository:
             .order_by(payments.c.deadline_at)
             .limit(limit)
         )
-        return list((await self._s.execute(stmt)).scalars().all())
+        # Pending attempts are few (in flight only) and covered by a partial index.
+        pending = (
+            sa.select(payment_attempts.c.payment_id)
+            .join(payments, payments.c.id == payment_attempts.c.payment_id)
+            .where(
+                payment_attempts.c.status == AttemptStatus.PENDING.value,
+                payments.c.deadline_at < older_than,
+            )
+            .limit(limit)
+        )
+        ids = list((await self._s.execute(abandoned)).scalars().all())
+        ids += (await self._s.execute(pending)).scalars().all()
+        return list(dict.fromkeys(ids))[:limit]
 
     async def attempt_stats(self, since: datetime) -> list[dict[str, Any]]:
         status = payment_attempts.c.status

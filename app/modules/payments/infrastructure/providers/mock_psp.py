@@ -6,7 +6,6 @@ and error semantics and the adapter is where they are normalized:
 - beta / gamma: named decline reasons ("do_not_honor", "stolen_card"...).
 """
 
-import hmac
 import json
 import logging
 import time
@@ -28,7 +27,7 @@ from app.modules.payments.domain.enums import OutcomeKind
 from app.modules.payments.domain.money import Money
 from app.modules.payments.domain.outcome import ProviderOutcome
 
-from .base import hmac_sha256_hex, safe_json, send
+from .base import hmac_sha256_hex, is_unix_timestamp, safe_json, send, signature_matches
 from .vault import TestTokenVault
 
 logger = logging.getLogger("payments.providers")
@@ -298,7 +297,7 @@ class BetaProvider(_MockProviderBase):
             item.split("=", 1) for item in headers.get("x-signature", "").split(",") if "=" in item
         )
         timestamp, signature = parts.get("t", ""), parts.get("v1", "")
-        if not timestamp.isdigit() or not signature:
+        if not is_unix_timestamp(timestamp) or not signature:
             raise InvalidWebhookError("missing signature")
         if abs(time.time() - int(timestamp)) > self.signature_tolerance_seconds:
             raise InvalidWebhookError("timestamp outside tolerance")  # replay protection
@@ -329,7 +328,7 @@ class BetaProvider(_MockProviderBase):
 
 
 def _compare(expected: str, given: str) -> bool:
-    return hmac.compare_digest(expected, given)
+    return signature_matches(expected, given)
 
 
 def _load(body: bytes) -> dict[str, Any]:

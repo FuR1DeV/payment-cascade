@@ -1,15 +1,20 @@
 """Stripe (test mode only) through its REST API with httpx.
 
-Status after a timeout: Stripe stores the result of a request under its Idempotency-Key
-(for 24 hours), so the safe way to learn what happened is to repeat the same request with
-the same key. It either returns the stored result or, if the first request never arrived,
-executes it once. If we already know the PaymentIntent id we just read it.
+Status after a timeout, in this order:
+1. the PaymentIntent id is known: read the intent;
+2. search intents by our attempt key in metadata (search results can lag about a minute);
+3. nothing found and the attempt is young: repeat the same create request with the same
+   Idempotency-Key. Stripe returns the stored result of the first request (it stores
+   errors too, even a 500) or, if the first request never arrived, executes it once.
+   Stripe keeps idempotency results for 24 hours; after that a repeat would be a NEW
+   charge, so we only repeat within REPLAY_WINDOW and otherwise stay "unknown" (the
+   payment stays in review and raises an alert after many checks).
 """
 
-import hmac
 import json
 import time
 from collections.abc import Mapping
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -27,7 +32,7 @@ from app.modules.payments.domain.enums import OutcomeKind
 from app.modules.payments.domain.money import Money
 from app.modules.payments.domain.outcome import ProviderOutcome
 
-from .base import hmac_sha256_hex, safe_json, send
+from .base import hmac_sha256_hex, is_unix_timestamp, safe_json, send, signature_matches
 from .mock_psp import classify_decline
 from .vault import TestTokenVault
 
@@ -60,6 +65,9 @@ STRIPE_CODES: dict[str, OutcomeKind] = {
     # 3-D Secure flow is out of scope here: stop and let the client handle it.
     "authentication_required": K.HARD_DECLINE,
 }
+
+
+REPLAY_WINDOW = timedelta(hours=1)  # far below Stripe's 24 h idempotency key retention
 
 
 class StripeProvider:
@@ -121,7 +129,32 @@ class StripeProvider:
             if isinstance(response, ProviderOutcome):
                 return response
             return self._parse(response)
-        return await self.charge(request.charge)  # idempotent replay, see module docstring
+
+        found = await self._search(request.charge.idempotency_key)
+        if found is not None:
+            return found
+        if request.attempt_age is not None and request.attempt_age < REPLAY_WINDOW:
+            return await self.charge(request.charge)  # idempotent replay, see module docstring
+        # Not found by search is not proof of "not charged" (search lags, or the first
+        # request failed before an intent existed). Stay unknown: a human decides.
+        return ProviderOutcome.unknown("not_found_outside_replay_window")
+
+    async def _search(self, attempt_key: str) -> ProviderOutcome | None:
+        """Outcome of the intent created for this attempt, or None if search found nothing."""
+        response = await send(
+            lambda: self._client.get(
+                "/v1/payment_intents/search",
+                params={"query": f"metadata['attempt_key']:'{attempt_key}'"},
+            ),
+            self._timeout,
+        )
+        if isinstance(response, ProviderOutcome):
+            return response  # network problem: unknown
+        data = safe_json(response) or {}
+        intents = data.get("data") if response.status_code == 200 else None
+        if isinstance(intents, list) and intents and isinstance(intents[0], dict):
+            return self._parse_intent(intents[0])
+        return None
 
     def _parse(self, response: httpx.Response) -> ProviderOutcome:
         data = safe_json(response) or {}
@@ -191,17 +224,19 @@ class StripeProvider:
         ]
         timestamp = next((v for k, v in items if k == "t"), "")
         signatures = [v for k, v in items if k == "v1"]
-        if not timestamp.isdigit() or not signatures:
+        if not is_unix_timestamp(timestamp) or not signatures:
             raise InvalidWebhookError("missing signature")
         if abs(time.time() - int(timestamp)) > self.signature_tolerance_seconds:
             raise InvalidWebhookError("timestamp outside tolerance")
         expected = hmac_sha256_hex(self._webhook_secret, timestamp.encode() + b"." + body)
-        if not any(hmac.compare_digest(expected, s) for s in signatures):
+        if not any(signature_matches(expected, s) for s in signatures):
             raise InvalidWebhookError("bad signature")
         try:
             event = json.loads(body)
         except ValueError:
             raise InvalidWebhookError("body is not JSON") from None
+        if not isinstance(event, dict):
+            raise InvalidWebhookError("body is not an object")
         event_id, event_type = str(event.get("id", "")), str(event.get("type", ""))
         intent = (event.get("data") or {}).get("object") or {}
         if not event_id or event_type not in (

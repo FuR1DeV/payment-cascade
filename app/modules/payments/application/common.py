@@ -2,7 +2,7 @@
 
 import logging
 from collections.abc import Iterable
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from app.modules.payments.domain.entities import Alert, Payment, PaymentAttempt
 from app.modules.payments.domain.enums import AlertKind
@@ -132,9 +132,11 @@ def charge_request(payment: Payment, attempt: PaymentAttempt) -> ChargeRequest:
     )
 
 
-def status_request(payment: Payment, attempt: PaymentAttempt) -> StatusRequest:
+def status_request(payment: Payment, attempt: PaymentAttempt, now: datetime) -> StatusRequest:
     return StatusRequest(
-        charge=charge_request(payment, attempt), provider_payment_id=attempt.provider_payment_id
+        charge=charge_request(payment, attempt),
+        provider_payment_id=attempt.provider_payment_id,
+        attempt_age=now - attempt.created_at,
     )
 
 

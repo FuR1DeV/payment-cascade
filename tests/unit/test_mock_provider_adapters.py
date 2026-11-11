@@ -259,3 +259,25 @@ def test_beta_webhook_signature_and_replay_window() -> None:
     assert provider.parse_webhook(header(now), body).outcome.kind is K.APPROVED  # type: ignore[union-attr]
     with pytest.raises(InvalidWebhookError, match="tolerance"):
         provider.parse_webhook(header(now - 3600), body)
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        {"x-alpha-signature": "é" * 64},  # non-ASCII: compare_digest(str) would raise
+        {"x-signature": "t=²³,v1=abc"},  # Unicode digits pass isdigit() but not int()
+        {"x-signature": "t=1700000000,v1=ü"},
+    ],
+)
+def test_garbage_signature_headers_are_rejected_not_crashing(header: dict[str, str]) -> None:
+    alpha_provider = broken(RuntimeError())
+    beta_provider = BetaProvider(
+        code="mock_beta",
+        client=httpx.AsyncClient(),
+        webhook_secret="x",
+        timeout_seconds=1,
+        vault=TestTokenVault(),
+    )
+    for provider in (alpha_provider, beta_provider):
+        with pytest.raises(InvalidWebhookError):
+            provider.parse_webhook(header, b"{}")

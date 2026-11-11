@@ -38,6 +38,17 @@ def hmac_sha256_hex(secret: str, message: bytes) -> str:
     return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
 
 
+def signature_matches(expected: str, given: str) -> bool:
+    """Constant-time compare. Bytes, because compare_digest rejects non-ASCII str and a
+    header from the outside world may contain anything."""
+    return hmac.compare_digest(expected.encode(), given.encode("utf-8", "surrogateescape"))
+
+
+def is_unix_timestamp(value: str) -> bool:
+    # str.isdigit() alone accepts "²" and other Unicode digits that int() rejects.
+    return value.isascii() and value.isdigit() and len(value) <= 12
+
+
 def safe_json(response: httpx.Response) -> dict | None:
     try:
         data = response.json()
