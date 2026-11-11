@@ -34,6 +34,19 @@ async def send(
         return ProviderOutcome.unknown("transport_error", type(exc).__name__)
 
 
+def unanswered_status_query(failure: httpx.Response | ProviderOutcome) -> ProviderOutcome:
+    """A status query that got no real answer says nothing about the charge.
+
+    For a charge request, "could not connect" or a 4xx means that request was not
+    processed, so the next provider may be tried. For a status query the same failure
+    only means the question went unanswered: the charge itself is still unknown, and
+    reading it as "not charged" would let the cascade charge the card twice.
+    """
+    if isinstance(failure, httpx.Response):
+        return ProviderOutcome.unknown(f"status_http_{failure.status_code}")
+    return ProviderOutcome.unknown(f"status_{failure.code}", failure.message)
+
+
 def hmac_sha256_hex(secret: str, message: bytes) -> str:
     return hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
 

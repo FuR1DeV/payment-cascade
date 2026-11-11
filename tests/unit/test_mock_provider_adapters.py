@@ -200,6 +200,56 @@ async def test_network_failures_are_classified_by_whether_request_left(
 
 
 @pytest.mark.parametrize(
+    "exc",
+    [httpx.ConnectError("refused"), httpx.ConnectTimeout("slow"), httpx.ReadTimeout("slow")],
+)
+async def test_failed_status_query_leaves_the_charge_unknown(exc: Exception) -> None:
+    # "Could not connect" proves that a charge request never left. For a status query it
+    # only proves that the question was not asked: the earlier charge may still exist.
+    outcome = await broken(exc).get_status(StatusRequest(charge=charge("tok_approve")))
+    assert outcome.kind is K.UNKNOWN
+
+
+def replying(cls: type[AlphaProvider] | type[BetaProvider], status: int, body: dict):  # type: ignore[no-untyped-def]
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json=body)
+
+    return cls(
+        code=f"mock_{cls.__name__.removesuffix('Provider').lower()}",
+        client=httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://x"),
+        webhook_secret="x",
+        timeout_seconds=1,
+        vault=TestTokenVault(),
+    )
+
+
+@pytest.mark.parametrize("cls", [AlphaProvider, BetaProvider])
+@pytest.mark.parametrize(
+    ("status", "body", "kind"),
+    [
+        # Only "not found" is an answer about the charge (the reference is stored on
+        # receipt). Any other rejection of the status query leaves the charge unknown.
+        (404, {"error": "not found"}, K.TECHNICAL_ERROR),
+        (400, {"error": "bad request"}, K.UNKNOWN),
+        (401, {"error": "bad key"}, K.UNKNOWN),
+        (429, {"error": "slow down"}, K.UNKNOWN),
+        (
+            503,
+            {"response_code": "96", "processed": False, "error": {"processed": False}},
+            K.UNKNOWN,
+        ),
+    ],
+)
+async def test_rejected_status_query_leaves_the_charge_unknown(
+    cls: type[AlphaProvider] | type[BetaProvider], status: int, body: dict, kind: OutcomeKind
+) -> None:
+    outcome = await replying(cls, status, body).get_status(
+        StatusRequest(charge=charge("tok_approve"))
+    )
+    assert outcome.kind is kind
+
+
+@pytest.mark.parametrize(
     ("status", "body", "kind"),
     [
         (500, {"error": "internal"}, K.UNKNOWN),

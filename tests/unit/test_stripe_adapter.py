@@ -21,10 +21,15 @@ from app.modules.payments.infrastructure.providers.vault import TestTokenVault
 K = OutcomeKind
 
 
-def stripe(responses: list[httpx.Response], seen: list[httpx.Request]) -> StripeProvider:
+def stripe(
+    responses: list[httpx.Response | Exception], seen: list[httpx.Request]
+) -> StripeProvider:
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        return responses.pop(0)
+        reply = responses.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
 
     return StripeProvider(
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="https://stripe"),
@@ -129,6 +134,47 @@ async def test_young_attempt_not_found_is_replayed_with_same_key() -> None:
     assert outcome.kind is K.APPROVED
     assert seen[1].method == "POST"
     assert seen[1].headers["Idempotency-Key"] == req.idempotency_key
+
+
+REFUSED = httpx.ConnectError("refused")
+RATE_LIMITED = httpx.Response(429, json={"error": {"message": "rate limit"}})
+BAD_KEY = httpx.Response(401, json={"error": {"message": "invalid api key"}})
+
+
+@pytest.mark.parametrize("failure", [REFUSED, RATE_LIMITED, BAD_KEY])
+async def test_failed_read_by_id_leaves_the_charge_unknown(
+    failure: httpx.Response | Exception,
+) -> None:
+    # For a charge these failures mean "not processed"; for a status read they mean only
+    # that the question went unanswered.
+    outcome = await stripe([failure], []).get_status(
+        StatusRequest(charge=request(), provider_payment_id="pi_9")
+    )
+    assert outcome.kind is K.UNKNOWN
+
+
+async def test_failed_search_leaves_the_charge_unknown() -> None:
+    seen: list[httpx.Request] = []
+    outcome = await stripe([REFUSED], seen).get_status(
+        StatusRequest(charge=request(), attempt_age=timedelta(seconds=5))
+    )
+    assert outcome.kind is K.UNKNOWN
+    assert len(seen) == 1  # no replay after a failed search
+
+
+@pytest.mark.parametrize("failure", [REFUSED, RATE_LIMITED, BAD_KEY])
+async def test_failed_replay_leaves_the_charge_unknown(failure: httpx.Response | Exception) -> None:
+    outcome = await stripe([NOTHING_FOUND, failure], []).get_status(
+        StatusRequest(charge=request(), attempt_age=timedelta(seconds=5))
+    )
+    assert outcome.kind is K.UNKNOWN
+
+
+async def test_replayed_card_decline_is_a_real_answer() -> None:
+    outcome = await stripe([NOTHING_FOUND, card_error("do_not_honor")], []).get_status(
+        StatusRequest(charge=request(), attempt_age=timedelta(seconds=5))
+    )
+    assert (outcome.kind, outcome.code) == (K.SOFT_DECLINE, "do_not_honor")
 
 
 async def test_old_attempt_is_never_replayed() -> None:

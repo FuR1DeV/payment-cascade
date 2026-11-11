@@ -32,7 +32,14 @@ from app.modules.payments.domain.enums import OutcomeKind
 from app.modules.payments.domain.money import Money
 from app.modules.payments.domain.outcome import ProviderOutcome
 
-from .base import hmac_sha256_hex, is_unix_timestamp, safe_json, send, signature_matches
+from .base import (
+    hmac_sha256_hex,
+    is_unix_timestamp,
+    safe_json,
+    send,
+    signature_matches,
+    unanswered_status_query,
+)
 from .mock_psp import classify_decline
 from .vault import TestTokenVault
 
@@ -107,8 +114,8 @@ class StripeProvider:
             form["description"] = request.description
         return form
 
-    async def charge(self, request: ChargeRequest) -> ProviderOutcome:
-        response = await send(
+    async def _create_intent(self, request: ChargeRequest) -> httpx.Response | ProviderOutcome:
+        return await send(
             lambda: self._client.post(
                 "/v1/payment_intents",
                 data=self._form(request),
@@ -116,6 +123,9 @@ class StripeProvider:
             ),
             self._timeout,
         )
+
+    async def charge(self, request: ChargeRequest) -> ProviderOutcome:
+        response = await self._create_intent(request)
         if isinstance(response, ProviderOutcome):
             return response
         return self._parse(response)
@@ -126,15 +136,21 @@ class StripeProvider:
                 lambda: self._client.get(f"/v1/payment_intents/{request.provider_payment_id}"),
                 self._timeout,
             )
-            if isinstance(response, ProviderOutcome):
-                return response
+            if isinstance(response, ProviderOutcome) or response.status_code != 200:
+                return unanswered_status_query(response)
             return self._parse(response)
 
         found = await self._search(request.charge.idempotency_key)
         if found is not None:
             return found
         if request.attempt_age is not None and request.attempt_age < REPLAY_WINDOW:
-            return await self.charge(request.charge)  # idempotent replay, see module docstring
+            # Idempotent replay, see the module docstring. Only a real answer counts:
+            # the intent (200) or a card decline (402). A failed replay says nothing
+            # about the original request.
+            response = await self._create_intent(request.charge)
+            if isinstance(response, ProviderOutcome) or response.status_code not in (200, 402):
+                return unanswered_status_query(response)
+            return self._parse(response)
         # Not found by search is not proof of "not charged" (search lags, or the first
         # request failed before an intent existed). Stay unknown: a human decides.
         return ProviderOutcome.unknown("not_found_outside_replay_window")
@@ -149,7 +165,9 @@ class StripeProvider:
             self._timeout,
         )
         if isinstance(response, ProviderOutcome):
-            return response  # network problem: unknown
+            return unanswered_status_query(response)
+        # A non-200 search counts as "nothing found": the caller then replays the request
+        # with the same key, which is safe, or stays unknown.
         data = safe_json(response) or {}
         intents = data.get("data") if response.status_code == 200 else None
         if isinstance(intents, list) and intents and isinstance(intents[0], dict):

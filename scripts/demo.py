@@ -63,12 +63,13 @@ def simple(
     return payment
 
 
-def decided_by_status_check(payment: dict[str, Any], attempt_no: int) -> None:
-    # The mock sends the webhook later than our status check in these scenarios, so the
-    # answer must have come from the status check, not from the webhook.
+def status_was_checked(payment: dict[str, Any], attempt_no: int) -> None:
+    # In these scenarios the mock sends the webhook seconds after our status check, so
+    # the check answers first. The counter shows that the check was made; it cannot
+    # tell by itself which of the two answers came first.
     attempt = payment["attempts"][attempt_no - 1]
     check(
-        "  ...decided by a status check",
+        "  ...status checked",
         attempt["status_checks"] >= 1,
         f"attempt {attempt_no}: status_checks={attempt['status_checks']}",
     )
@@ -121,7 +122,7 @@ def main() -> int:
         [("mock_alpha", "approved")],
         "succeeded",
     )
-    decided_by_status_check(p, 1)
+    status_was_checked(p, 1)
     charges = psp.get("/_admin/charges", params={"reference_prefix": p["id"]}).json()
     check("  ...provider saw exactly one charge", len(charges) == 1, f"{len(charges)} charge(s)")
     p = simple(
@@ -131,7 +132,7 @@ def main() -> int:
         [("mock_alpha", "error"), ("mock_beta", "approved")],
         "succeeded",
     )
-    decided_by_status_check(p, 1)
+    status_was_checked(p, 1)
     p = simple(
         client,
         "500 without guarantee -> status check",
@@ -139,7 +140,7 @@ def main() -> int:
         [("mock_alpha", "declined_soft"), ("mock_beta", "approved")],
         "succeeded",
     )
-    decided_by_status_check(p, 2)
+    status_was_checked(p, 2)
 
     # Idempotency: the same key twice gives the same payment and no second charge.
     key = uuid.uuid4().hex

@@ -27,7 +27,14 @@ from app.modules.payments.domain.enums import OutcomeKind
 from app.modules.payments.domain.money import Money
 from app.modules.payments.domain.outcome import ProviderOutcome
 
-from .base import hmac_sha256_hex, is_unix_timestamp, safe_json, send, signature_matches
+from .base import (
+    hmac_sha256_hex,
+    is_unix_timestamp,
+    safe_json,
+    send,
+    signature_matches,
+    unanswered_status_query,
+)
 from .vault import TestTokenVault
 
 logger = logging.getLogger("payments.providers")
@@ -134,11 +141,13 @@ class AlphaProvider(_MockProviderBase):
             self._timeout,
         )
         if isinstance(response, ProviderOutcome):
-            return response
+            return unanswered_status_query(response)
         if response.status_code == 404:
             # Alpha's contract: the reference is stored when the request is received.
             # "Not found" therefore means the request never arrived: nothing was charged.
             return ProviderOutcome.technical_error("not_found", "provider has no such payment")
+        if response.status_code != 200:
+            return unanswered_status_query(response)
         return self._parse(response)
 
     def _parse(self, response: httpx.Response) -> ProviderOutcome:
@@ -238,10 +247,12 @@ class BetaProvider(_MockProviderBase):
             self._timeout,
         )
         if isinstance(response, ProviderOutcome):
-            return response
+            return unanswered_status_query(response)
         if response.status_code == 404:
             # Same contract as alpha: references are stored on receipt.
             return ProviderOutcome.technical_error("not_found", "provider has no such charge")
+        if response.status_code != 200:
+            return unanswered_status_query(response)
         return self._parse(response)
 
     def _parse(self, response: httpx.Response) -> ProviderOutcome:

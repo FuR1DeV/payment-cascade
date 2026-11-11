@@ -213,8 +213,14 @@ function codeDetail(attempt) {
   return ` (код ${attempt.provider_code}${message})`;
 }
 
-function explainAttempt(a) {
+function explainAttempt(a, payment) {
   const checked = a.status_checks > 0;
+  // A late charge is refunded both when another attempt already paid and when the
+  // customer was already told "failed".
+  const why =
+    payment.status === "failed"
+      ? "клиенту уже ответили отказом"
+      : "платёж уже оплачен другой попыткой";
   switch (a.status) {
     case "pending":
       return "Запрос у провайдера, ответа пока нет.";
@@ -238,9 +244,9 @@ function explainAttempt(a) {
     case "unknown":
       return `Исход неизвестен${codeDetail(a)}. К следующему провайдеру идти нельзя: этот ещё может списать деньги. Сервис переспрашивает статус.`;
     case "refund_pending":
-      return "Провайдер всё-таки списал деньги, но платёж уже оплачен другой попыткой. Это лишнее списание, возврат поставлен в очередь.";
+      return `Провайдер всё-таки списал деньги, но ${why}. Это лишнее списание, возврат поставлен в очередь.`;
     case "refunded":
-      return "Лишнее списание: платёж уже был оплачен другой попыткой. Деньги возвращены.";
+      return `Лишнее списание: провайдер списал деньги, когда ${why}. Деньги возвращены.`;
     default:
       return a.status;
   }
@@ -370,11 +376,11 @@ class Run {
   }
 }
 
-function renderAttempt(a, paymentCreatedAt) {
+function renderAttempt(a, payment) {
   const [label, tone] = attemptLabel(a.status);
-  const start = fmtSeconds(secondsBetween(paymentCreatedAt, a.created_at), 2);
+  const start = fmtSeconds(secondsBetween(payment.created_at, a.created_at), 2);
   const time = a.finished_at
-    ? `+${start} … +${fmtSeconds(secondsBetween(paymentCreatedAt, a.finished_at), 2)} с`
+    ? `+${start} … +${fmtSeconds(secondsBetween(payment.created_at, a.finished_at), 2)} с`
     : `с +${start} с`;
   const meta = [`проверок статуса: ${a.status_checks}`];
   if (a.provider_payment_id) meta.push(`id у провайдера: ${a.provider_payment_id}`);
@@ -390,7 +396,7 @@ function renderAttempt(a, paymentCreatedAt) {
       h("span", { class: `badge ${toneClass(tone)}` }, label),
       h("span", { class: "attempt-time", title: "По часам сервера от создания платежа" }, time),
     ),
-    h("div", { class: "attempt-why" }, explainAttempt(a)),
+    h("div", { class: "attempt-why" }, explainAttempt(a, payment)),
     h("div", { class: "attempt-meta" }, meta.join(" · ")),
   );
 }
@@ -408,7 +414,7 @@ function renderPayment(run, p) {
     h(
       "ol",
       { class: "attempts" },
-      p.attempts.map((a) => renderAttempt(a, p.created_at)),
+      p.attempts.map((a) => renderAttempt(a, p)),
     ),
   );
   run.foot.replaceChildren(
@@ -457,7 +463,12 @@ function logDiff(run, before, after) {
 }
 
 async function syncAlerts(run, paymentId, seen) {
-  const result = await api("GET", `/alerts?payment_id=${encodeURIComponent(paymentId)}`);
+  let result;
+  try {
+    result = await api("GET", `/alerts?payment_id=${encodeURIComponent(paymentId)}`);
+  } catch {
+    return 0; // the next poll asks again
+  }
   if (!run.alive || result.status !== 200 || !Array.isArray(result.data)) return 0;
   let fresh = 0;
   for (const alert of result.data) {
@@ -493,14 +504,32 @@ async function follow(run, payment, minSeconds) {
       ? `Следим за платежом ещё ${Math.max(0, Math.ceil(minSeconds - waited()))} с: может прийти поздний ответ провайдера.`
       : `Следим за платежом ${Math.floor(waited())} с: работу продолжает фоновая задача.`,
   );
+  // The API may be down for a while (a restart, the crash test): keep asking, and log a
+  // problem once, not on every poll.
+  let problem = null;
+  const report = (text) => {
+    if (text !== problem) run.log(text, "bad");
+    problem = text;
+  };
   while (!done()) {
     await sleep(1000);
     if (!run.alive) return;
-    const result = await api("GET", `/payments/${payment.id}`);
+    let result;
+    try {
+      result = await api("GET", `/payments/${payment.id}`);
+    } catch (error) {
+      if (!run.alive) return;
+      report(`API не отвечает (${error.message}). Страница продолжает спрашивать.`);
+      continue;
+    }
     if (!run.alive) return;
     if (result.status !== 200) {
-      run.log(`GET /payments/{id}: HTTP ${result.status}`, "bad");
+      report(`GET /payments/{id}: HTTP ${result.status}. Страница продолжает спрашивать.`);
       continue;
+    }
+    if (problem) {
+      run.log("API снова отвечает.", "good");
+      problem = null;
     }
     changes += logDiff(run, current, result.data);
     current = result.data;
@@ -656,19 +685,23 @@ async function runBreaker(scenario, run) {
     const circuit = (alpha && alpha.circuit) || {};
     const open = circuit.state === "open";
     let text;
+    // The breaker counts every request to alpha in the last minute, including those of
+    // earlier scenarios: their failures bring the trip closer, their successes delay it.
+    const windowNote =
+      " В минутном окне предохранителя считаются и запросы к alpha из предыдущих " +
+      "сценариев: сбои среди них приближают срабатывание, удачные откладывают.";
     if (firstSkipped === 1) {
-      text = "alpha был выключен предохранителем ещё до начала серии, поэтому все платежи сразу пошли в beta.";
+      text = "alpha был выключен предохранителем ещё до начала серии, поэтому серия сразу пошла в beta.";
     } else if (firstSkipped !== null) {
       text =
         `Первые ${firstSkipped - 1} платежей начинались с alpha и после сбоя уходили в beta. ` +
         `С платежа ${firstSkipped} alpha пропускается: предохранитель его выключил.`;
-      if (firstSkipped - 1 < 10) {
-        text +=
-          " Порог набрался раньше десятого платежа серии: в минутном окне уже были запросы " +
-          "к alpha из предыдущих сценариев, и сбои среди них тоже считаются.";
-      }
+      if (firstSkipped - 1 !== 10) text += windowNote;
     } else {
-      text = "Предохранитель не сработал: все платежи начинались с alpha.";
+      text =
+        "Предохранитель не сработал: все платежи начинались с alpha." +
+        windowNote +
+        " Подождите минуту и запустите серию снова.";
     }
     if (open) text += ` alpha будет выключен ещё ${circuit.retry_after_seconds} с, потом снова получит запросы.`;
     text +=
@@ -688,7 +721,11 @@ function start(scenario) {
   const runner = runners[scenario.kind] || runPayment;
   const run = new Run(scenario);
   runner(scenario, run)
-    .catch((error) => console.error(error))
+    .catch((error) => {
+      // Last line of defence: never leave a card spinning without an explanation.
+      console.error(error);
+      if (run.alive) run.fail(`Сбой на странице: ${error.message}`);
+    })
     .finally(() => run.done());
 }
 
