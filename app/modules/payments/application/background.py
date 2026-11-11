@@ -97,7 +97,7 @@ class ReconcileUnknownAttempts:
             now = self._clock()
             alerts: list[Alert] = []
             # Even an "unknown" answer may carry the provider's payment id: keep it.
-            payment.record_outcome(attempt.attempt_no, outcome, now)
+            payment.record_status_check(attempt.attempt_no, outcome, now)
             if attempt.status is AttemptStatus.UNKNOWN:
                 # The delay grows with the age of the attempt: frequent checks in the first
                 # minutes, when most cases resolve, rare ones later. Age rather than the check

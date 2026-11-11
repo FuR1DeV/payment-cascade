@@ -142,3 +142,14 @@ def test_review_resolves_to_success_or_failure() -> None:
     not_charged.record_outcome(1, ERROR, T0)
     assert not_charged.status is PaymentStatus.FAILED
     assert not_charged.failure_reason == "not_charged_after_review"
+
+
+def test_status_checks_count_every_query_and_nothing_else() -> None:
+    payment = processing_payment()
+    payment.begin_attempt("a", T0)
+    payment.record_outcome(1, UNKNOWN, T0)  # the charge response: not a status check
+    assert payment.record_status_check(1, UNKNOWN, T0) is False  # still unknown, counted
+    assert payment.record_status_check(1, APPROVED, T0) is True  # resolving query, counted
+    payment.record_outcome(1, APPROVED, T0)  # the webhook afterwards: not a status check
+    assert payment.attempt(1).status_checks == 2
+    assert payment.status is PaymentStatus.SUCCEEDED

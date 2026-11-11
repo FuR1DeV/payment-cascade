@@ -63,6 +63,17 @@ def simple(
     return payment
 
 
+def decided_by_status_check(payment: dict[str, Any], attempt_no: int) -> None:
+    # The mock sends the webhook later than our status check in these scenarios, so the
+    # answer must have come from the status check, not from the webhook.
+    attempt = payment["attempts"][attempt_no - 1]
+    check(
+        "  ...decided by a status check",
+        attempt["status_checks"] >= 1,
+        f"attempt {attempt_no}: status_checks={attempt['status_checks']}",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--slow", action="store_true", help="also run the requires_review scenario")
@@ -110,22 +121,25 @@ def main() -> int:
         [("mock_alpha", "approved")],
         "succeeded",
     )
+    decided_by_status_check(p, 1)
     charges = psp.get("/_admin/charges", params={"reference_prefix": p["id"]}).json()
     check("  ...provider saw exactly one charge", len(charges) == 1, f"{len(charges)} charge(s)")
-    simple(
+    p = simple(
         client,
         "timeout, not processed -> cascade",
         "tok_timeout_not_processed",
         [("mock_alpha", "error"), ("mock_beta", "approved")],
         "succeeded",
     )
-    simple(
+    decided_by_status_check(p, 1)
+    p = simple(
         client,
         "500 without guarantee -> status check",
         "tok_beta_server_error",
         [("mock_alpha", "declined_soft"), ("mock_beta", "approved")],
         "succeeded",
     )
+    decided_by_status_check(p, 2)
 
     # Idempotency: the same key twice gives the same payment and no second charge.
     key = uuid.uuid4().hex

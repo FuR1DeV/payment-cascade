@@ -31,10 +31,13 @@ SCENARIOS: dict[str, dict[str, Behavior]] = {
     "tok_insufficient_funds": {"alpha": Behavior(outcome="insufficient")},
     "tok_all_soft": {p: Behavior(outcome="soft") for p in ("alpha", "beta", "gamma")},
     # Timeout, but alpha did charge: the status check finds it, no cascade.
-    "tok_timeout_approved": {"alpha": Behavior(response_delay=10, settle_after=1)},
+    # In this scenario and the next two the webhook comes 5 s after settlement, later than
+    # the status check, so the status check decides and the webhook is a no-op duplicate.
+    # With an earlier webhook the webhook would decide; both paths are correct.
+    "tok_timeout_approved": {"alpha": Behavior(response_delay=10, settle_after=1, webhook_delay=5)},
     # Timeout, alpha did not process it: the status check says so, cascade to beta.
     "tok_timeout_not_processed": {
-        "alpha": Behavior(outcome="tech_error", response_delay=10, settle_after=1)
+        "alpha": Behavior(outcome="tech_error", response_delay=10, settle_after=1, webhook_delay=5)
     },
     # Timeout and alpha stays "processing" for a minute, no webhook: requires_review,
     # then the background reconciliation finds the approval.
@@ -49,7 +52,7 @@ SCENARIOS: dict[str, dict[str, Behavior]] = {
     # Beta returns 500 without saying whether it processed the request; it did approve.
     "tok_beta_server_error": {
         "alpha": Behavior(outcome="soft"),
-        "beta": Behavior(outcome="server_error", final_outcome="approve"),
+        "beta": Behavior(outcome="server_error", final_outcome="approve", webhook_delay=5),
     },
 }
 

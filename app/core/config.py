@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     log_level: str = "INFO"
+    # Static demo page at /demo/ that drives the scenarios through the public API.
+    # For local runs and reviewers only; switch it off anywhere real.
+    demo_page_enabled: bool = True
 
     database_url: str = "postgresql+asyncpg://payments:payments@localhost:5432/payments"
     database_pool_size: int = 10

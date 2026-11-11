@@ -98,5 +98,5 @@ def test_approval_after_not_charged_is_a_late_approval(status: AttemptStatus) ->
 def test_status_check_scheduling_only_for_unknown() -> None:
     attempt = attempt_in(A.UNKNOWN)
     attempt.schedule_status_check(T0, timedelta(seconds=5))
-    assert attempt.status_checks == 1
+    assert attempt.status_checks == 0  # scheduled, not made yet
     assert attempt.next_status_check_at == T0 + timedelta(seconds=5)

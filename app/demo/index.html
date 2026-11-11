@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Каскад платежей: демо</title>
+  <link rel="stylesheet" href="demo.css">
+  <script src="demo.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <h1>Каскад платежей</h1>
+      <p class="lead">
+        Каждая кнопка отправляет платёж на 19,99 с тестовым токеном карты. Поддельные провайдеры
+        alpha, beta и gamma ведут себя по сценарию этого токена, без случайностей. В карточке
+        платежа видно, что сделал сервис: к кому ходил, что ему ответили и почему он пошёл
+        дальше или остановился.
+      </p>
+      <p class="meta">
+        Страница ничего не решает сама: она вызывает тот же публичный API, что и curl
+        (<a href="/docs">Swagger</a>). Время в журнале считается по часам браузера от нажатия
+        кнопки, время попыток по часам сервера от создания платежа.
+      </p>
+    </div>
+  </header>
+
+  <main class="wrap layout">
+    <aside class="side">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Сценарии</h2>
+          <label class="currency">
+            Валюта
+            <select id="currency">
+              <option value="USD">USD: маршрут по умолчанию</option>
+              <option value="EUR">EUR: своё правило, beta первым</option>
+            </select>
+          </label>
+        </div>
+        <p class="hint" id="currency-hint"></p>
+        <div id="scenarios" class="scenarios"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Провайдеры</h2>
+        <p class="hint">Попытки за последний час и состояние предохранителя. Обновляется каждые 2 с.</p>
+        <div id="providers" class="providers"></div>
+      </section>
+    </aside>
+
+    <section class="feed" aria-live="polite">
+      <div id="banner" class="banner" hidden></div>
+      <div class="feed-head">
+        <h2>Платежи</h2>
+        <button type="button" id="clear" class="link-button">Очистить</button>
+      </div>
+      <p id="empty" class="empty">
+        Выберите сценарий слева. Другой сценарий очищает ленту, повторное нажатие того же
+        добавляет ещё один платёж сверху.
+      </p>
+      <div id="runs" class="runs"></div>
+      <p class="footnote">
+        Краш-теста здесь нет: для него нужно остановить контейнер API посреди платежа.
+        Как это сделать, описано в README.
+      </p>
+    </section>
+  </main>
+</body>
+</html>

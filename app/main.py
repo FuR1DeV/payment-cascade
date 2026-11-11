@@ -1,14 +1,18 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import sqlalchemy as sa
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.modules.payments.api import router as payments_router
 from app.modules.payments.bootstrap import Container, build_container
+
+DEMO_DIR = Path(__file__).parent / "demo"
 
 
 def create_app(container: Container | None = None) -> FastAPI:
@@ -40,6 +44,11 @@ def create_app(container: Container | None = None) -> FastAPI:
     if container is not None:
         app.state.container = container
     app.include_router(payments_router)
+
+    settings = container.settings if container is not None else get_settings()
+    if settings.demo_page_enabled:
+        # Plain HTML and JS that call the same public endpoints; no logic of its own.
+        app.mount("/demo", StaticFiles(directory=DEMO_DIR, html=True), name="demo")
 
     @app.get("/health", tags=["service"])
     async def health(request: Request) -> JSONResponse:

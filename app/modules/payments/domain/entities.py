@@ -151,7 +151,7 @@ class PaymentAttempt(BaseModel):
             raise AttemptNotAllowed(
                 f"attempt {self.attempt_no} is {self.status.value}, not unknown"
             )
-        self.status_checks += 1
+        # Scheduling is not a check: status_checks is counted in Payment.record_status_check.
         self.next_status_check_at = now + delay
         self.updated_at = now
 
@@ -333,6 +333,13 @@ class Payment(BaseModel):
                 # last open attempt turned out "not charged" is over.
                 self.resolve_review(now)
         return changed
+
+    def record_status_check(self, attempt_no: int, outcome: ProviderOutcome, now: datetime) -> bool:
+        """Apply the answer to our status query. The query is counted whatever it said."""
+        attempt = self.attempt(attempt_no)
+        attempt.status_checks += 1
+        attempt.updated_at = now
+        return self.record_outcome(attempt_no, outcome, now)
 
     def _on_approved(self, attempt: PaymentAttempt, now: datetime) -> None:
         # The first approval recorded under the payment lock wins.

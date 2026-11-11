@@ -75,11 +75,14 @@ class ProcessPayment:
                 if attempt is None:
                     return payment
                 with log_context(attempt_no=attempt.attempt_no, provider=attempt.provider):
-                    if isinstance(step, TryProvider):
-                        outcome = await self._charge(payment, attempt)
-                    else:
+                    status_check = not isinstance(step, TryProvider)
+                    if status_check:
                         outcome = await self._check_status(payment, attempt)
-                    await self._record(payment_id, attempt.attempt_no, outcome)
+                    else:
+                        outcome = await self._charge(payment, attempt)
+                    await self._record(
+                        payment_id, attempt.attempt_no, outcome, status_check=status_check
+                    )
 
     async def _route(self, payment_id: UUID) -> list[str]:
         async with self._uow_factory() as uow:
@@ -164,7 +167,9 @@ class ProcessPayment:
         )
         return outcome
 
-    async def _record(self, payment_id: UUID, attempt_no: int, outcome: ProviderOutcome) -> None:
+    async def _record(
+        self, payment_id: UUID, attempt_no: int, outcome: ProviderOutcome, *, status_check: bool
+    ) -> None:
         async with self._uow_factory() as uow:
             payment = await uow.payments.get(payment_id, for_update=True)
             if payment is None:
@@ -173,7 +178,10 @@ class ProcessPayment:
             attempt = payment.attempt(attempt_no)
             was_unknown = attempt.status is AttemptStatus.UNKNOWN
             # Applied even when the answer is "unknown": it may carry the provider's id.
-            payment.record_outcome(attempt_no, outcome, now)
+            if status_check:
+                payment.record_status_check(attempt_no, outcome, now)
+            else:
+                payment.record_outcome(attempt_no, outcome, now)
             if was_unknown and attempt.status is AttemptStatus.UNKNOWN:
                 attempt.schedule_status_check(now, timedelta(0))
             await persist(uow, payment, self._jobs)

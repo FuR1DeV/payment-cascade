@@ -67,6 +67,7 @@ async def test_timeout_and_provider_charged_means_no_cascade(
     assert statuses(payment) == [("mock_alpha", "approved")]
     assert payment["attempts"][0]["provider_payment_id"] == "alpha_77"
     assert len(alpha.status_calls) == 2
+    assert payment["attempts"][0]["status_checks"] == 2
     assert beta.charge_calls == []  # the whole point: no second charge
 
 
@@ -77,6 +78,7 @@ async def test_timeout_and_provider_did_not_process_cascades(
     alpha.status_script = [tech("not_found")]
     payment = (await pay(client)).json()
     assert statuses(payment) == [("mock_alpha", "error"), ("mock_beta", "approved")]
+    assert [a["status_checks"] for a in payment["attempts"]] == [1, 0]
 
 
 async def test_unresolved_timeout_goes_to_review_then_reconciliation_settles_it(
