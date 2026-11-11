@@ -1,0 +1,112 @@
+name: payment-cascade
+
+x-env: &env
+  LOG_LEVEL: INFO
+  DATABASE_URL: postgresql+asyncpg://payments:payments@postgres:5432/payments
+  REDIS_URL: redis://redis:6379/0
+  MOCK_PSP_BASE_URL: http://mock-psp:9000
+  # Dev-only secrets of the mock providers (not real credentials).
+  MOCK_ALPHA_WEBHOOK_SECRET: dev-alpha-secret
+  MOCK_BETA_WEBHOOK_SECRET: dev-beta-secret
+  MOCK_GAMMA_WEBHOOK_SECRET: dev-gamma-secret
+
+x-app: &app
+  build: .
+  image: payment-cascade:local
+  # Optional: STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET (test mode) go here.
+  env_file:
+    - path: .env
+      required: false
+  environment: *env
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: payments
+      POSTGRES_PASSWORD: payments
+      POSTGRES_DB: payments
+    volumes:
+      - ./docker/postgres/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payments -d payments"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+
+  mock-psp:
+    <<: *app
+    command: ["uvicorn", "mock_psp.app:app_from_env", "--factory", "--host", "0.0.0.0", "--port", "9000"]
+    environment:
+      <<: *env
+      WEBHOOK_TARGET_BASE_URL: http://api:8000/webhooks
+    depends_on: []
+    ports:
+      - "${MOCK_PSP_PORT:-9000}:9000"
+
+  api:
+    <<: *app
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mock-psp:
+        condition: service_started
+    ports:
+      - "${API_PORT:-8080}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    <<: *app
+    command:
+      - taskiq
+      - worker
+      - app.modules.payments.infrastructure.tasks.broker:broker
+      - app.modules.payments.infrastructure.tasks.tasks
+      - --workers
+      - "1"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  scheduler:
+    <<: *app
+    command:
+      - taskiq
+      - scheduler
+      - app.modules.payments.infrastructure.tasks.broker:scheduler
+      - app.modules.payments.infrastructure.tasks.tasks
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # docker compose --profile test run --rm tests
+  tests:
+    <<: *app
+    profiles: ["test"]
+    command: ["pytest", "-q"]
+    environment:
+      <<: *env
+      DATABASE_URL: postgresql+asyncpg://payments:payments@postgres:5432/payments_test
+      REDIS_URL: redis://redis:6379/15

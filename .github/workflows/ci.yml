@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: payments
+          POSTGRES_PASSWORD: payments
+          POSTGRES_DB: payments_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U payments -d payments_test"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      DATABASE_URL: postgresql+asyncpg://payments:payments@localhost:5432/payments_test
+      REDIS_URL: redis://localhost:6379/15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Poetry
+        run: pipx install "poetry==2.5.1"
+      - name: Install dependencies
+        run: poetry install --no-root --no-interaction
+      - name: Lint
+        run: |
+          poetry run ruff check .
+          poetry run ruff format --check .
+      - name: Tests
+        run: poetry run pytest -q
+
+  compose:
+    # The same image and command a reviewer would use locally.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the stack
+        run: |
+          docker compose up -d --build
+          for i in $(seq 1 60); do curl -sf localhost:8080/health && exit 0; sleep 2; done
+          exit 1
+      - name: Run scenarios against the running stack
+        run: docker compose exec -T api python -m scripts.demo
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --tail 200
